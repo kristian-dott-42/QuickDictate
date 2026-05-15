@@ -1,0 +1,363 @@
+import AppKit
+import AVFoundation
+
+// MARK: - Config
+
+let homeDir = NSHomeDirectory()
+
+func loadEnv() -> [String: String] {
+    guard let content = try? String(contentsOfFile: homeDir + "/.dictate/.env", encoding: .utf8) else { return [:] }
+    var out: [String: String] = [:]
+    for line in content.components(separatedBy: "\n") {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty, !t.hasPrefix("#"), let eq = t.firstIndex(of: "=") else { continue }
+        let k = String(t[..<eq]).trimmingCharacters(in: .whitespaces)
+        let v = String(t[t.index(after: eq)...])
+            .trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: .init(charactersIn: "\"'"))
+        out[k] = v
+    }
+    return out
+}
+
+let envFile = loadEnv()
+func cfg(_ key: String, _ def: String = "") -> String {
+    ProcessInfo.processInfo.environment[key] ?? envFile[key] ?? def
+}
+
+let OPENAI_KEY      = cfg("OPENAI_API_KEY")
+
+// STT (speech-to-text) — defaults to OpenAI Whisper, override for Groq etc.
+let STT_URL         = cfg("STT_URL",   "https://api.openai.com/v1/audio/transcriptions")
+let STT_KEY         = cfg("STT_KEY",   OPENAI_KEY)
+let STT_MODEL       = cfg("STT_MODEL", "whisper-1")
+
+// LLM (cleanup) — defaults to OpenAI gpt-4o-mini, override for Groq etc.
+let LLM_URL         = cfg("LLM_URL",   "https://api.openai.com/v1/chat/completions")
+let LLM_KEY         = cfg("LLM_KEY",   OPENAI_KEY)
+let LLM_MODEL       = cfg("LLM_MODEL", "gpt-4o-mini")
+
+let WHISPER_PROMPT  = cfg("WHISPER_PROMPT", "")
+let FN_KEYCODE: UInt16 = 63
+let MIN_SECS: TimeInterval = 0.4
+let MAX_SECS: TimeInterval = 120.0
+let REQUEST_TIMEOUT: TimeInterval = 30.0
+
+let CLEANUP_PROMPT = "Clean up this voice transcription for pasting as typed text. Remove filler words (um, uh, er, like, you know, sort of, basically, right), fix punctuation and capitalisation, and make it read naturally. Preserve the exact meaning and tone. Return only the cleaned text — no explanation, no quotes, no preamble."
+
+let HALLUCINATIONS: Set<String> = ["you","you.","thank you","thank you.","thanks","thanks.","bye","bye."]
+
+// MARK: - Logging
+
+let logFile: FileHandle? = {
+    let path = homeDir + "/.dictate/dictate.log"
+    FileManager.default.createFile(atPath: path, contents: nil)
+    return FileHandle(forWritingAtPath: path)
+}()
+
+func log(_ msg: String) {
+    let line = "\(Date()): \(msg)\n"
+    if let data = line.data(using: .utf8) {
+        logFile?.seekToEndOfFile()
+        logFile?.write(data)
+    }
+}
+
+// MARK: - Notify / Paste
+
+func notify(_ title: String, _ body: String) {
+    let t = Process()
+    t.launchPath = "/usr/bin/osascript"
+    t.arguments  = ["-e", "display notification \"\(body)\" with title \"\(title)\""]
+    try? t.run()
+}
+
+func pasteText(_ text: String, target: NSRunningApplication?, onDone: @escaping () -> Void) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        if let app = target {
+            log("paste: activating \(app.localizedName ?? "unknown")")
+            app.activate(options: .activateIgnoringOtherApps)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            var err: NSDictionary?
+            NSAppleScript(source: "tell application \"System Events\" to keystroke \"v\" using {command down}")?
+                .executeAndReturnError(&err)
+            if let err = err { log("paste error: \(err)") }
+            else { log("paste: done") }
+            onDone()
+        }
+    }
+}
+
+// MARK: - APIs
+
+func callSTT(path: String) -> String? {
+    guard let audio = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+    var req = URLRequest(url: URL(string: STT_URL)!)
+    req.timeoutInterval = REQUEST_TIMEOUT
+    req.httpMethod = "POST"
+    let b = UUID().uuidString
+    req.setValue("Bearer \(STT_KEY)", forHTTPHeaderField: "Authorization")
+    req.setValue("multipart/form-data; boundary=\(b)", forHTTPHeaderField: "Content-Type")
+    var body = Data()
+    var fields = [("model", STT_MODEL), ("language", "en"), ("response_format", "json")]
+    if !WHISPER_PROMPT.isEmpty { fields.append(("prompt", WHISPER_PROMPT)) }
+    for (n, v) in fields {
+        body.append("--\(b)\r\nContent-Disposition: form-data; name=\"\(n)\"\r\n\r\n\(v)\r\n".data(using: .utf8)!)
+    }
+    body.append("--\(b)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
+    body.append(audio)
+    body.append("\r\n--\(b)--\r\n".data(using: .utf8)!)
+    req.httpBody = body
+    let sema = DispatchSemaphore(value: 0)
+    var result: String?
+    URLSession.shared.dataTask(with: req) { data, _, err in
+        defer { sema.signal() }
+        if let err = err { log("stt network error: \(err)"); return }
+        if let data = data,
+           let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let t = j["text"] as? String { result = t.trimmingCharacters(in: .whitespacesAndNewlines) }
+            else if let e = j["error"] as? [String: Any] { log("stt api error: \(e)") }
+        }
+    }.resume()
+    sema.wait()
+    return result
+}
+
+func callLLM(raw: String) -> String {
+    let body: [String: Any] = [
+        "model": LLM_MODEL,
+        "messages": [["role": "system", "content": CLEANUP_PROMPT], ["role": "user", "content": raw]],
+        "max_tokens": 1024, "temperature": 0.1
+    ]
+    var req = URLRequest(url: URL(string: LLM_URL)!)
+    req.timeoutInterval = REQUEST_TIMEOUT
+    req.httpMethod = "POST"
+    req.setValue("Bearer \(LLM_KEY)", forHTTPHeaderField: "Authorization")
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+    let sema = DispatchSemaphore(value: 0)
+    var result = raw  // fall back to raw if cleanup fails
+    URLSession.shared.dataTask(with: req) { data, _, err in
+        defer { sema.signal() }
+        if let err = err { log("llm network error: \(err)"); return }
+        if let data = data,
+           let j    = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let ch = j["choices"] as? [[String: Any]],
+               let msg = ch.first?["message"] as? [String: Any],
+               let s = msg["content"] as? String {
+                result = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else if let e = j["error"] as? [String: Any] {
+                log("llm api error: \(e)")
+            }
+        }
+    }.resume()
+    sema.wait()
+    return result
+}
+
+// MARK: - Bubble Indicator
+
+class BubbleView: NSView {
+    enum Mode { case recording, transcribing }
+    var mode: Mode = .recording { didSet { needsDisplay = true } }
+    private var phase: CGFloat = 0
+    private var timer: Timer?
+
+    override init(frame f: NSRect) {
+        super.init(frame: f)
+        wantsLayer = true
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            self?.phase += 0.08
+            self?.needsDisplay = true
+        }
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    deinit { timer?.invalidate() }
+
+    override func draw(_ dirty: NSRect) {
+        let r = bounds.height / 2
+        NSColor.black.withAlphaComponent(0.82).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: r, yRadius: r).fill()
+
+        let dot = NSRect(x: 14, y: (bounds.height - 10) / 2, width: 10, height: 10)
+        let pulse = 0.45 + 0.55 * abs(sin(phase))
+        switch mode {
+        case .recording:
+            NSColor.systemRed.withAlphaComponent(pulse).setFill()
+        case .transcribing:
+            NSColor.systemOrange.withAlphaComponent(pulse).setFill()
+        }
+        NSBezierPath(ovalIn: dot).fill()
+
+        let text = mode == .recording ? "Recording" : "Transcribing"
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+            .foregroundColor: NSColor.white,
+        ]
+        let s = NSAttributedString(string: text, attributes: attrs)
+        s.draw(at: NSPoint(x: 32, y: (bounds.height - s.size().height) / 2 - 1))
+    }
+}
+
+final class Bubble {
+    private var window: NSPanel?
+    private var view: BubbleView?
+
+    func show(_ mode: BubbleView.Mode) {
+        DispatchQueue.main.async {
+            if self.window == nil { self.build() }
+            self.view?.mode = mode
+            self.window?.orderFrontRegardless()
+        }
+    }
+
+    func hide() {
+        DispatchQueue.main.async {
+            self.window?.orderOut(nil)
+            self.window = nil
+            self.view = nil
+        }
+    }
+
+    private func build() {
+        guard let screen = NSScreen.main else { return }
+        let w: CGFloat = 150, h: CGFloat = 32
+        let x = screen.frame.midX - w / 2
+        let y = screen.visibleFrame.maxY - h - 14
+        let rect = NSRect(x: x, y: y, width: w, height: h)
+        let panel = NSPanel(contentRect: rect,
+                            styleMask: [.nonactivatingPanel, .borderless],
+                            backing: .buffered, defer: false)
+        panel.isFloatingPanel = true
+        panel.level = .statusBar
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.ignoresMouseEvents = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .transient, .ignoresCycle]
+        panel.hidesOnDeactivate = false
+        let v = BubbleView(frame: NSRect(origin: .zero, size: rect.size))
+        panel.contentView = v
+        window = panel
+        view = v
+    }
+}
+
+let bubble = Bubble()
+
+// MARK: - App Delegate
+
+class Delegate: NSObject, NSApplicationDelegate {
+    var recorder: AVAudioRecorder?
+    var recordStart: Date?
+    var tmpPath = ""
+    var isRecording = false
+    var monitor: Any?
+    var targetApp: NSRunningApplication?
+
+    func applicationDidFinishLaunching(_ n: Notification) {
+        guard !STT_KEY.isEmpty else {
+            log("ERROR: STT_KEY/OPENAI_API_KEY not set in ~/.dictate/.env")
+            notify("Dictate Error", "API key not set — see ~/.dictate/.env")
+            exit(1)
+        }
+        log("STT: \(STT_URL) (\(STT_MODEL))")
+        log("LLM: \(LLM_URL) (\(LLM_MODEL))")
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+            DispatchQueue.main.async {
+                if granted { self?.setupHotkey() }
+                else {
+                    log("Microphone access denied")
+                    notify("Dictate", "Microphone access denied in System Settings.")
+                    exit(1)
+                }
+            }
+        }
+    }
+
+    func setupHotkey() {
+        let trusted = AXIsProcessTrusted()
+        log("Accessibility trusted: \(trusted)")
+        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        AXIsProcessTrustedWithOptions(opts)
+        monitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] e in
+            self?.handle(e)
+        }
+        log("Ready — hold fn to dictate")
+        notify("Dictate", "Ready — hold fn to dictate")
+    }
+
+    func handle(_ e: NSEvent) {
+        guard e.type == .flagsChanged, e.keyCode == FN_KEYCODE else { return }
+        if e.modifierFlags.contains(.function), !isRecording { startRec() }
+        else if !e.modifierFlags.contains(.function), isRecording { stopRec() }
+    }
+
+    func startRec() {
+        targetApp = NSWorkspace.shared.frontmostApplication
+        let path = NSTemporaryDirectory() + "dictate_\(Int(Date().timeIntervalSince1970)).wav"
+        tmpPath = path
+        let s: [String: Any] = [AVFormatIDKey: Int(kAudioFormatLinearPCM), AVSampleRateKey: 16000.0,
+                                 AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false]
+        guard let r = try? AVAudioRecorder(url: URL(fileURLWithPath: path), settings: s), r.record() else {
+            notify("Dictate Error", "Can't start recording"); return
+        }
+        recorder = r; recordStart = Date(); isRecording = true
+        bubble.show(.recording)
+        DispatchQueue.main.asyncAfter(deadline: .now() + MAX_SECS) { [weak self] in
+            if self?.isRecording == true { self?.stopRec() }
+        }
+    }
+
+    func stopRec() {
+        guard let start = recordStart else { return }
+        recorder?.stop(); recorder = nil; isRecording = false
+        let dur = Date().timeIntervalSince(start); let path = tmpPath
+        guard dur >= MIN_SECS else {
+            try? FileManager.default.removeItem(atPath: path)
+            bubble.hide()
+            return
+        }
+        bubble.show(.transcribing)
+        DispatchQueue.global().async { [weak self] in self?.process(path: path, dur: dur) }
+    }
+
+    func process(path: String, dur: TimeInterval) {
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let t0 = Date()
+        guard let raw = callSTT(path: path), !raw.isEmpty else {
+            log("Nothing heard.")
+            bubble.hide()
+            notify("Dictate", "Nothing heard.")
+            return
+        }
+        let sttTime = Date().timeIntervalSince(t0)
+        log(String(format: "stt %.2fs: %@", sttTime, raw))
+        guard !HALLUCINATIONS.contains(raw.lowercased()) else {
+            log("hallucination skipped")
+            bubble.hide()
+            notify("Dictate", "Didn't catch that — try again."); return
+        }
+        let t1 = Date()
+        let cleaned = callLLM(raw: raw)
+        let llmTime = Date().timeIntervalSince(t1)
+        log(String(format: "llm %.2fs: %@", llmTime, cleaned))
+        let app = self.targetApp
+        DispatchQueue.main.async {
+            pasteText(cleaned, target: app) {
+                bubble.hide()
+            }
+        }
+    }
+}
+
+// MARK: - Entry point
+
+let delegate = Delegate()
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+app.delegate = delegate
+app.run()

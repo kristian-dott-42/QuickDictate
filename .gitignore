@@ -1,0 +1,21 @@
+# Secrets — never commit
+.env
+*.env
+
+# Logs and temporary recording files
+*.log
+dictate.log
+dictate_*.wav
+
+# Built artefacts
+QuickDictate.app/
+build/
+*.dSYM/
+
+# macOS junk
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.xcodeproj/
