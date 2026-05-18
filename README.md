@@ -41,6 +41,9 @@ Edit `~/.dictate/.env`. Changes take effect on the next recording — no restart
 | `LLM_KEY` | — | API key for cleanup |
 | `LLM_MODEL` | `gpt-4o-mini` | Cleanup model |
 | `WHISPER_PROMPT` | — | Vocabulary hint — names, brands, jargon |
+| `CLEANUP_PROMPT` | built-in | Override the cleanup instructions entirely |
+
+`.env` is re-read before every dictation, so changes to keys, models, or prompts take effect immediately — no restart.
 
 ### Recommended: Groq
 
@@ -53,10 +56,15 @@ STT_KEY=gsk_...
 STT_MODEL=whisper-large-v3-turbo
 LLM_URL=https://api.groq.com/openai/v1/chat/completions
 LLM_KEY=gsk_...
-LLM_MODEL=llama-3.1-8b-instant
+LLM_MODEL=llama-3.3-70b-versatile
 ```
 
 Get a key at [console.groq.com](https://console.groq.com).
+
+> **Note on the cleanup model:** use a capable model like `llama-3.3-70b-versatile`.
+> Small models (e.g. `llama-3.1-8b-instant`) sometimes *respond* to dictation that
+> sounds like a request instead of just cleaning it up. Groq runs the 70B fast
+> enough that there's no real latency cost.
 
 ### Vocabulary tuning
 
