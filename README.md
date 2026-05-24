@@ -42,8 +42,14 @@ Edit `~/.dictate/.env`. Changes take effect on the next recording — no restart
 | `LLM_MODEL` | `gpt-4o-mini` | Cleanup model |
 | `WHISPER_PROMPT` | — | Vocabulary hint — names, brands, jargon |
 | `CLEANUP_PROMPT` | built-in | Override the cleanup instructions entirely |
+| `HOTKEY_KEYCODE` | `63` (fn) | Push-to-talk key (e.g. `61` = right option) |
+| `HOTKEY_EXCLUSIVE` | `true` | Consume the key so no other app can grab it |
 
-`.env` is re-read before every dictation, so changes to keys, models, or prompts take effect immediately — no restart.
+`.env` is re-read before every dictation, so changes to keys, models, or prompts take effect immediately — no restart. (`HOTKEY_*` are read once at launch, so restart the app after changing those.)
+
+### Reliability
+
+The hotkey is captured with an active `CGEventTap` inserted at the head of the event stream, so QuickDictate gets the key **first** and (with `HOTKEY_EXCLUSIVE=true`) consumes it — preventing other apps, especially other dictation tools, from racing for the same key. The paste is synthesised directly via `CGEvent`, with no AppleScript or System Events dependency.
 
 ### Recommended: Groq
 

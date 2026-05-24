@@ -47,7 +47,20 @@ struct Config {
     }
 }
 
-let FN_KEYCODE: UInt16 = 63
+// Hotkey config — read once at launch (the event tap is built once).
+// HOTKEY_KEYCODE: which key triggers push-to-talk (63 = fn, 61 = right option).
+// HOTKEY_EXCLUSIVE: if true, the key is consumed so no other app can see it.
+func hotkeyConfig() -> (keycode: Int64, exclusive: Bool) {
+    let env = loadEnv()
+    func cfg(_ k: String, _ d: String) -> String {
+        ProcessInfo.processInfo.environment[k] ?? env[k] ?? d
+    }
+    let code = Int64(cfg("HOTKEY_KEYCODE", "63")) ?? 63
+    let excl = cfg("HOTKEY_EXCLUSIVE", "true").lowercased()
+    return (code, excl == "true" || excl == "1" || excl == "yes")
+}
+
+let (HOTKEY_KEYCODE, HOTKEY_EXCLUSIVE) = hotkeyConfig()
 let MIN_SECS: TimeInterval = 0.4
 let MAX_SECS: TimeInterval = 120.0
 let REQUEST_TIMEOUT: TimeInterval = 30.0
@@ -108,6 +121,24 @@ func notify(_ title: String, _ body: String) {
     try? t.run()
 }
 
+// Synthesise Cmd+V directly via CGEvent — no AppleScript / System Events
+// dependency (which periodically wedges with a -600 error after reboots/sleep).
+// Requires Accessibility permission, which we already hold for the event tap.
+func sendCmdV() {
+    let src = CGEventSource(stateID: .combinedSessionState)
+    let vKey: CGKeyCode = 9  // 'v'
+    guard let down = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: true),
+          let up   = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: false) else {
+        log("paste error: could not create CGEvent")
+        return
+    }
+    down.flags = .maskCommand
+    up.flags   = .maskCommand
+    down.post(tap: .cgAnnotatedSessionEventTap)
+    up.post(tap: .cgAnnotatedSessionEventTap)
+    log("paste: done")
+}
+
 func pasteText(_ text: String, target: NSRunningApplication?, onDone: @escaping () -> Void) {
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(text, forType: .string)
@@ -117,11 +148,7 @@ func pasteText(_ text: String, target: NSRunningApplication?, onDone: @escaping 
             app.activate(options: .activateIgnoringOtherApps)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            var err: NSDictionary?
-            NSAppleScript(source: "tell application \"System Events\" to keystroke \"v\" using {command down}")?
-                .executeAndReturnError(&err)
-            if let err = err { log("paste error: \(err)") }
-            else { log("paste: done") }
+            sendCmdV()
             onDone()
         }
     }
@@ -291,6 +318,47 @@ final class Bubble {
 
 let bubble = Bubble()
 
+// MARK: - Event tap
+
+// Is the modifier identified by `keycode` currently down, per this event's flags?
+func modifierIsDown(_ event: CGEvent, _ keycode: Int64) -> Bool {
+    let f = event.flags
+    switch keycode {
+    case 63:        return f.contains(.maskSecondaryFn)   // fn / globe
+    case 54, 55:    return f.contains(.maskCommand)       // R/L command
+    case 58, 61:    return f.contains(.maskAlternate)     // L/R option
+    case 59, 62:    return f.contains(.maskControl)       // L/R control
+    case 56, 60:    return f.contains(.maskShift)         // L/R shift
+    default:        return false
+    }
+}
+
+// C-compatible callback (no captured context — references file-scope globals only).
+let eventTapCallback: CGEventTapCallBack = { _, type, event, _ in
+    // The system disables a tap if it ever stalls — re-arm it immediately.
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        if let tap = delegate.eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
+        return Unmanaged.passUnretained(event)
+    }
+
+    let keycode = event.getIntegerValueField(.keyboardEventKeycode)
+    guard keycode == HOTKEY_KEYCODE else { return Unmanaged.passUnretained(event) }
+
+    let pressed: Bool
+    switch type {
+    case .flagsChanged: pressed = modifierIsDown(event, keycode)  // fn etc.
+    case .keyDown:      pressed = true                            // normal keys
+    case .keyUp:        pressed = false
+    default:            return Unmanaged.passUnretained(event)
+    }
+
+    DispatchQueue.main.async {
+        if pressed { delegate.startRec() } else { delegate.stopRec() }
+    }
+
+    return HOTKEY_EXCLUSIVE ? nil : Unmanaged.passUnretained(event)
+}
+
 // MARK: - App Delegate
 
 class Delegate: NSObject, NSApplicationDelegate {
@@ -298,7 +366,7 @@ class Delegate: NSObject, NSApplicationDelegate {
     var recordStart: Date?
     var tmpPath = ""
     var isRecording = false
-    var monitor: Any?
+    var eventTap: CFMachPort?
     var targetApp: NSRunningApplication?
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -327,17 +395,33 @@ class Delegate: NSObject, NSApplicationDelegate {
         log("Accessibility trusted: \(trusted)")
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         AXIsProcessTrustedWithOptions(opts)
-        monitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] e in
-            self?.handle(e)
-        }
-        log("Ready — hold fn to dictate")
-        notify("Dictate", "Ready — hold fn to dictate")
-    }
 
-    func handle(_ e: NSEvent) {
-        guard e.type == .flagsChanged, e.keyCode == FN_KEYCODE else { return }
-        if e.modifierFlags.contains(.function), !isRecording { startRec() }
-        else if !e.modifierFlags.contains(.function), isRecording { stopRec() }
+        // Active event tap, head-inserted at the session level: we get the key
+        // FIRST and (when exclusive) consume it so no other app can race for it.
+        let mask: CGEventMask =
+            (1 << CGEventType.flagsChanged.rawValue) |
+            (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.keyUp.rawValue)
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: eventTapCallback,
+            userInfo: nil
+        ) else {
+            log("ERROR: could not create event tap — is Accessibility granted?")
+            notify("Dictate", "Couldn't claim the hotkey — grant Accessibility & restart.")
+            return
+        }
+        eventTap = tap
+        let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+
+        log("Ready — keycode \(HOTKEY_KEYCODE), exclusive: \(HOTKEY_EXCLUSIVE)")
+        notify("Dictate", "Ready — hold fn to dictate")
     }
 
     func startRec() {
