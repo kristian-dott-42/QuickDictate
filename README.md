@@ -24,6 +24,19 @@ cd QuickDictate
 
 Then add your API key to `~/.dictate/.env` (copied from `.env.example` during install) and follow the on-screen prompts to grant Microphone + Accessibility permissions.
 
+### Recommended: one-time signing certificate
+
+QuickDictate is a locally-compiled app. If it's **ad-hoc signed**, macOS gives it a new code identity on every rebuild and **silently drops your Accessibility/Microphone grants each time you re-run `install.sh`** (symptom: the hotkey stops working and `dictate.log` shows `Accessibility trusted: false`, even though the toggle looks on).
+
+To make the grants stick, create a self-signed code-signing certificate **once**:
+
+1. Open **Keychain Access** → menu **Certificate Assistant → Create a Certificate…**
+2. **Name:** `QuickDictate Local`
+3. **Identity Type:** Self Signed Root
+4. **Certificate Type:** Code Signing → **Create**
+
+`install.sh` detects this certificate automatically and signs with it, so your permissions persist across rebuilds. (Override the name with `QUICKDICTATE_SIGN_IDENTITY` if you prefer a different one.)
+
 ## Usage
 
 - **Hold `fn`** — recording starts; a red pulsing bubble appears top-centre of screen
@@ -128,8 +141,20 @@ Add them to `WHISPER_PROMPT` in `.env`.
 **fn key opens the emoji picker instead:**
 System Settings → Keyboard → "Press fn key to" → **Do Nothing**.
 
-**After re-running `install.sh`:**
-The binary changes so macOS revokes Accessibility. Re-grant as above.
+**After re-running `install.sh` the hotkey stops working / `Accessibility trusted: false`:**
+This happens when the app is **ad-hoc signed** — each rebuild gets a new code
+identity, so macOS drops the grant (the toggle still *looks* on, but applies to
+the old binary). Fix it permanently with the one-time signing certificate under
+[Install](#recommended-one-time-signing-certificate). To recover right now:
+
+```bash
+pkill -f QuickDictate
+tccutil reset Accessibility com.kristian.quickdictate
+open ~/Applications/QuickDictate.app   # grant Accessibility when prompted
+```
+
+Toggling the switch off/on is often not enough — remove the entry with the **–**
+button and re-add it, or use the `tccutil reset` above.
 
 ## Privacy
 
