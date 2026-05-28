@@ -115,9 +115,15 @@ func log(_ msg: String) {
 // MARK: - Notify / Paste
 
 func notify(_ title: String, _ body: String) {
+    // Escape backslashes and quotes so a stray character in the message can't
+    // break (or inject into) the AppleScript we hand to osascript.
+    func esc(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+         .replacingOccurrences(of: "\"", with: "\\\"")
+    }
     let t = Process()
     t.launchPath = "/usr/bin/osascript"
-    t.arguments  = ["-e", "display notification \"\(body)\" with title \"\(title)\""]
+    t.arguments  = ["-e", "display notification \"\(esc(body))\" with title \"\(esc(title))\""]
     try? t.run()
 }
 
@@ -139,7 +145,20 @@ func sendCmdV() {
     log("paste: done")
 }
 
+// Snapshot every representation currently on the pasteboard so we can put it
+// back after pasting — dictation should not clobber whatever the user copied.
+func snapshotClipboard() -> [NSPasteboardItem] {
+    NSPasteboard.general.pasteboardItems?.compactMap { item in
+        let copy = NSPasteboardItem()
+        for type in item.types {
+            if let data = item.data(forType: type) { copy.setData(data, forType: type) }
+        }
+        return copy.types.isEmpty ? nil : copy
+    } ?? []
+}
+
 func pasteText(_ text: String, target: NSRunningApplication?, onDone: @escaping () -> Void) {
+    let saved = snapshotClipboard()
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(text, forType: .string)
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -149,7 +168,15 @@ func pasteText(_ text: String, target: NSRunningApplication?, onDone: @escaping 
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             sendCmdV()
-            onDone()
+            // Restore the user's previous clipboard once the paste has landed.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                if !saved.isEmpty {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.writeObjects(saved)
+                    log("paste: clipboard restored")
+                }
+                onDone()
+            }
         }
     }
 }
@@ -157,8 +184,12 @@ func pasteText(_ text: String, target: NSRunningApplication?, onDone: @escaping 
 // MARK: - APIs
 
 func callSTT(path: String, config: Config) -> String? {
+    guard let url = URL(string: config.sttURL) else {
+        log("stt config error: invalid STT_URL '\(config.sttURL)'")
+        return nil
+    }
     guard let audio = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
-    var req = URLRequest(url: URL(string: config.sttURL)!)
+    var req = URLRequest(url: url)
     req.timeoutInterval = REQUEST_TIMEOUT
     req.httpMethod = "POST"
     let b = UUID().uuidString
@@ -176,9 +207,12 @@ func callSTT(path: String, config: Config) -> String? {
     req.httpBody = body
     let sema = DispatchSemaphore(value: 0)
     var result: String?
-    URLSession.shared.dataTask(with: req) { data, _, err in
+    URLSession.shared.dataTask(with: req) { data, resp, err in
         defer { sema.signal() }
         if let err = err { log("stt network error: \(err)"); return }
+        if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            log("stt http error: status \(http.statusCode)")
+        }
         if let data = data,
            let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             if let t = j["text"] as? String { result = t.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -196,9 +230,13 @@ func callLLM(raw: String, config: Config) -> String {
             ["role": "system", "content": config.cleanupPrompt],
             ["role": "user",   "content": "<dictation>\n\(raw)\n</dictation>"],
         ],
-        "max_tokens": 1024, "temperature": 0.1
+        "max_tokens": 4096, "temperature": 0.1
     ]
-    var req = URLRequest(url: URL(string: config.llmURL)!)
+    guard let url = URL(string: config.llmURL) else {
+        log("llm config error: invalid LLM_URL '\(config.llmURL)'")
+        return raw
+    }
+    var req = URLRequest(url: url)
     req.timeoutInterval = REQUEST_TIMEOUT
     req.httpMethod = "POST"
     req.setValue("Bearer \(config.llmKey)", forHTTPHeaderField: "Authorization")
@@ -206,9 +244,12 @@ func callLLM(raw: String, config: Config) -> String {
     req.httpBody = try? JSONSerialization.data(withJSONObject: body)
     let sema = DispatchSemaphore(value: 0)
     var result = raw  // fall back to raw if cleanup fails
-    URLSession.shared.dataTask(with: req) { data, _, err in
+    URLSession.shared.dataTask(with: req) { data, resp, err in
         defer { sema.signal() }
         if let err = err { log("llm network error: \(err)"); return }
+        if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            log("llm http error: status \(http.statusCode)")
+        }
         if let data = data,
            let j    = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             if let ch = j["choices"] as? [[String: Any]],
@@ -231,8 +272,9 @@ func callLLM(raw: String, config: Config) -> String {
 // MARK: - Bubble Indicator
 
 class BubbleView: NSView {
-    enum Mode { case recording, transcribing }
+    enum Mode { case recording, transcribing, success, error }
     var mode: Mode = .recording { didSet { needsDisplay = true } }
+    var text: String? { didSet { needsDisplay = true } }   // optional custom label
     private var phase: CGFloat = 0
     private var timer: Timer?
 
@@ -253,21 +295,23 @@ class BubbleView: NSView {
         NSBezierPath(roundedRect: bounds, xRadius: r, yRadius: r).fill()
 
         let dot = NSRect(x: 14, y: (bounds.height - 10) / 2, width: 10, height: 10)
-        let pulse = 0.45 + 0.55 * abs(sin(phase))
+        // Recording/transcribing pulse to show activity; success/error are steady.
+        let color: NSColor, label: String, pulses: Bool
         switch mode {
-        case .recording:
-            NSColor.systemRed.withAlphaComponent(pulse).setFill()
-        case .transcribing:
-            NSColor.systemOrange.withAlphaComponent(pulse).setFill()
+        case .recording:    color = .systemRed;    label = "Recording";    pulses = true
+        case .transcribing: color = .systemOrange; label = "Transcribing"; pulses = true
+        case .success:      color = .systemGreen;  label = "Done";         pulses = false
+        case .error:        color = .systemRed;    label = "Failed";       pulses = false
         }
+        let alpha = pulses ? (0.45 + 0.55 * abs(sin(phase))) : 1.0
+        color.withAlphaComponent(alpha).setFill()
         NSBezierPath(ovalIn: dot).fill()
 
-        let text = mode == .recording ? "Recording" : "Transcribing"
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13, weight: .medium),
             .foregroundColor: NSColor.white,
         ]
-        let s = NSAttributedString(string: text, attributes: attrs)
+        let s = NSAttributedString(string: text ?? label, attributes: attrs)
         s.draw(at: NSPoint(x: 32, y: (bounds.height - s.size().height) / 2 - 1))
     }
 }
@@ -275,17 +319,37 @@ class BubbleView: NSView {
 final class Bubble {
     private var window: NSPanel?
     private var view: BubbleView?
+    private var generation = 0   // guards transient flashes against newer states
 
     func show(_ mode: BubbleView.Mode) {
         DispatchQueue.main.async {
+            self.generation += 1
             if self.window == nil { self.build() }
+            self.view?.text = nil
             self.view?.mode = mode
             self.window?.orderFrontRegardless()
         }
     }
 
+    // Briefly show a final state (e.g. success / error) then auto-hide — unless a
+    // newer recording has started in the meantime.
+    func flash(_ mode: BubbleView.Mode, _ message: String? = nil, hideAfter: TimeInterval = 1.4) {
+        DispatchQueue.main.async {
+            self.generation += 1
+            let gen = self.generation
+            if self.window == nil { self.build() }
+            self.view?.text = message
+            self.view?.mode = mode
+            self.window?.orderFrontRegardless()
+            DispatchQueue.main.asyncAfter(deadline: .now() + hideAfter) {
+                if self.generation == gen { self.hide() }
+            }
+        }
+    }
+
     func hide() {
         DispatchQueue.main.async {
+            self.generation += 1
             self.window?.orderOut(nil)
             self.window = nil
             self.view = nil
@@ -431,6 +495,7 @@ class Delegate: NSObject, NSApplicationDelegate {
         let s: [String: Any] = [AVFormatIDKey: Int(kAudioFormatLinearPCM), AVSampleRateKey: 16000.0,
                                  AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false]
         guard let r = try? AVAudioRecorder(url: URL(fileURLWithPath: path), settings: s), r.record() else {
+            bubble.flash(.error, "Mic error")
             notify("Dictate Error", "Can't start recording"); return
         }
         recorder = r; recordStart = Date(); isRecording = true
@@ -459,16 +524,14 @@ class Delegate: NSObject, NSApplicationDelegate {
         let t0 = Date()
         guard let raw = callSTT(path: path, config: config), !raw.isEmpty else {
             log("Nothing heard.")
-            bubble.hide()
-            notify("Dictate", "Nothing heard.")
+            bubble.flash(.error, "Nothing heard")
             return
         }
         let sttTime = Date().timeIntervalSince(t0)
         log(String(format: "stt %.2fs: %@", sttTime, raw))
         guard !HALLUCINATIONS.contains(raw.lowercased()) else {
             log("hallucination skipped")
-            bubble.hide()
-            notify("Dictate", "Didn't catch that — try again."); return
+            bubble.flash(.error, "Try again"); return
         }
         let t1 = Date()
         let cleaned = callLLM(raw: raw, config: config)
@@ -477,7 +540,7 @@ class Delegate: NSObject, NSApplicationDelegate {
         let app = self.targetApp
         DispatchQueue.main.async {
             pasteText(cleaned, target: app) {
-                bubble.hide()
+                bubble.flash(.success, hideAfter: 0.7)
             }
         }
     }
