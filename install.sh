@@ -23,6 +23,11 @@ if ! command -v swiftc &>/dev/null; then
 fi
 
 # ── Build app bundle ─────────────────────────────────────────────────────────
+# Stop any running copy first so we can replace the binary and so a stale
+# instance isn't left holding the keyboard event tap. (-x matches the process
+# name exactly, so it won't match this install script.)
+pkill -x QuickDictate 2>/dev/null || true
+
 echo "Building app bundle…"
 mkdir -p "$APP_DIR/Contents/MacOS"
 cp "$REPO_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
@@ -34,8 +39,39 @@ swiftc "$REPO_DIR/QuickDictate.swift" \
     -O \
     -o "$APP_DIR/Contents/MacOS/QuickDictate"
 
-# Ad-hoc code signing — required for TCC permission grants
-codesign --sign - --force --deep "$APP_DIR" 2>&1 | grep -v "replacing" || true
+# ── Code signing ─────────────────────────────────────────────────────────────
+# A STABLE signing identity is what lets macOS remember your Accessibility &
+# Microphone grants across rebuilds. With ad-hoc signing (codesign --sign -) the
+# code identity changes on every compile, so macOS treats each build as a brand
+# new app and silently drops the grants — you'd have to re-grant Accessibility
+# after every install. A self-signed certificate keeps the identity constant, so
+# the grants persist.
+#
+# Create the certificate ONCE:
+#   Keychain Access → Certificate Assistant → Create a Certificate…
+#     Name:            QuickDictate Local
+#     Identity Type:   Self Signed Root
+#     Certificate Type: Code Signing
+# After that this installer picks it up automatically.
+SIGN_IDENTITY="${QUICKDICTATE_SIGN_IDENTITY:-QuickDictate Local}"
+
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
+    echo "Signing with stable identity: $SIGN_IDENTITY"
+    codesign --sign "$SIGN_IDENTITY" --force --deep "$APP_DIR"
+    echo "   → Accessibility/Microphone grants will persist across rebuilds."
+else
+    echo ""
+    echo "⚠️   No '$SIGN_IDENTITY' code-signing certificate found — using ad-hoc signing."
+    echo "    macOS will DROP your Accessibility/Microphone grants on every rebuild,"
+    echo "    so you'd have to re-grant after each install. To fix this permanently,"
+    echo "    create a self-signed Code Signing certificate once:"
+    echo "      Keychain Access → Certificate Assistant → Create a Certificate…"
+    echo "        Name: QuickDictate Local | Identity Type: Self Signed Root"
+    echo "        Certificate Type: Code Signing"
+    echo "    then re-run ./install.sh."
+    echo ""
+    codesign --sign - --force --deep "$APP_DIR" 2>&1 | grep -v "replacing" || true
+fi
 
 # ── Config dir ───────────────────────────────────────────────────────────────
 mkdir -p "$CONFIG_DIR"

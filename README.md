@@ -24,6 +24,19 @@ cd QuickDictate
 
 Then add your API key to `~/.dictate/.env` (copied from `.env.example` during install) and follow the on-screen prompts to grant Microphone + Accessibility permissions.
 
+### Recommended: one-time signing certificate
+
+QuickDictate is a locally-compiled app. If it's **ad-hoc signed**, macOS gives it a new code identity on every rebuild and **silently drops your Accessibility/Microphone grants each time you re-run `install.sh`** (symptom: the hotkey stops working and `dictate.log` shows `Accessibility trusted: false`, even though the toggle looks on).
+
+To make the grants stick, create a self-signed code-signing certificate **once**:
+
+1. Open **Keychain Access** → menu **Certificate Assistant → Create a Certificate…**
+2. **Name:** `QuickDictate Local`
+3. **Identity Type:** Self Signed Root
+4. **Certificate Type:** Code Signing → **Create**
+
+`install.sh` detects this certificate automatically and signs with it, so your permissions persist across rebuilds. (Override the name with `QUICKDICTATE_SIGN_IDENTITY` if you prefer a different one.)
+
 ## Usage
 
 - **Hold `fn`** — recording starts; a red pulsing bubble appears top-centre of screen
@@ -44,13 +57,17 @@ Edit `~/.dictate/.env`. Changes take effect on the next recording — no restart
 | `WHISPER_PROMPT` | — | Vocabulary hint — names, brands, jargon |
 | `CLEANUP_PROMPT` | built-in | Override the cleanup instructions entirely |
 | `HOTKEY_KEYCODE` | `63` (fn) | Push-to-talk key (e.g. `61` = right option) |
-| `HOTKEY_EXCLUSIVE` | `true` | Consume the key so no other app can grab it |
+| `HOTKEY_EXCLUSIVE` | `false` | `true` consumes the hotkey so no other app sees it — see safety note below |
 
 `.env` is re-read before every dictation, so changes to keys, models, or prompts take effect immediately — no restart. (`HOTKEY_*` are read once at launch, so restart the app after changing those.)
 
-### Reliability
+### Reliability & safety
 
-The hotkey is captured with an active `CGEventTap` inserted at the head of the event stream, so QuickDictate gets the key **first** and (with `HOTKEY_EXCLUSIVE=true`) consumes it — preventing other apps, especially other dictation tools, from racing for the same key. The paste is synthesised directly via `CGEvent`, with no AppleScript or System Events dependency.
+The hotkey is captured with a `CGEventTap` serviced on its **own dedicated thread** — separate from the main thread that draws the bubble, activates apps, and writes the clipboard. Because key delivery never shares a run loop with UI work, the app **cannot freeze the keyboard** the way an event tap on the main run loop can. The callback also never blocks: it just notes the key and returns immediately. The paste is synthesised directly via `CGEvent`, with no AppleScript or System Events dependency.
+
+Only **Accessibility** permission is needed (the same one used to paste via ⌘V) — QuickDictate deliberately avoids a listen-only tap, which would require the separate *Input Monitoring* permission.
+
+By default (`HOTKEY_EXCLUSIVE=false`) the hotkey is observed but passed straight through, so it keeps working normally everywhere else. Set `HOTKEY_EXCLUSIVE=true` only if you need to stop other apps (e.g. another dictation tool) from also seeing the key — it then consumes the hotkey. Either way, if the app ever misbehaves you can force-quit it from **Activity Monitor** (or `pkill -f QuickDictate` over SSH).
 
 ### Recommended: Groq
 
@@ -124,8 +141,20 @@ Add them to `WHISPER_PROMPT` in `.env`.
 **fn key opens the emoji picker instead:**
 System Settings → Keyboard → "Press fn key to" → **Do Nothing**.
 
-**After re-running `install.sh`:**
-The binary changes so macOS revokes Accessibility. Re-grant as above.
+**After re-running `install.sh` the hotkey stops working / `Accessibility trusted: false`:**
+This happens when the app is **ad-hoc signed** — each rebuild gets a new code
+identity, so macOS drops the grant (the toggle still *looks* on, but applies to
+the old binary). Fix it permanently with the one-time signing certificate under
+[Install](#recommended-one-time-signing-certificate). To recover right now:
+
+```bash
+pkill -f QuickDictate
+tccutil reset Accessibility com.kristian.quickdictate
+open ~/Applications/QuickDictate.app   # grant Accessibility when prompted
+```
+
+Toggling the switch off/on is often not enough — remove the entry with the **–**
+button and re-add it, or use the `tccutil reset` above.
 
 ## Privacy
 
