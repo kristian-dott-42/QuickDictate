@@ -44,15 +44,17 @@ Edit `~/.dictate/.env`. Changes take effect on the next recording — no restart
 | `WHISPER_PROMPT` | — | Vocabulary hint — names, brands, jargon |
 | `CLEANUP_PROMPT` | built-in | Override the cleanup instructions entirely |
 | `HOTKEY_KEYCODE` | `63` (fn) | Push-to-talk key (e.g. `61` = right option) |
-| `HOTKEY_EXCLUSIVE` | `false` | `true` consumes the key (active tap) so no other app sees it — see safety note below |
+| `HOTKEY_EXCLUSIVE` | `false` | `true` consumes the hotkey so no other app sees it — see safety note below |
 
 `.env` is re-read before every dictation, so changes to keys, models, or prompts take effect immediately — no restart. (`HOTKEY_*` are read once at launch, so restart the app after changing those.)
 
 ### Reliability & safety
 
-By default the hotkey is observed with a **listen-only** `CGEventTap`: the system delivers key events to QuickDictate but never waits for it, so it can never delay, drop, or consume your keystrokes — it **cannot freeze the keyboard**, whatever the app is doing. The tap is also serviced on its own dedicated thread, keeping key delivery independent of any UI work. The paste is synthesised directly via `CGEvent`, with no AppleScript or System Events dependency.
+The hotkey is captured with a `CGEventTap` serviced on its **own dedicated thread** — separate from the main thread that draws the bubble, activates apps, and writes the clipboard. Because key delivery never shares a run loop with UI work, the app **cannot freeze the keyboard** the way an event tap on the main run loop can. The callback also never blocks: it just notes the key and returns immediately. The paste is synthesised directly via `CGEvent`, with no AppleScript or System Events dependency.
 
-**Exclusive mode (`HOTKEY_EXCLUSIVE=true`)** upgrades to an *active* tap so the hotkey is consumed and no other app (e.g. another dictation tool) sees it. This is opt-in because an active tap sits in the live event path. QuickDictate runs it on a dedicated thread and never blocks in the callback, so a freeze should not happen — but if the app ever does hang in this mode, force-quit it from **Activity Monitor** (or `pkill -f QuickDictate` over SSH) to restore the key. Most people don't need exclusive mode.
+Only **Accessibility** permission is needed (the same one used to paste via ⌘V) — QuickDictate deliberately avoids a listen-only tap, which would require the separate *Input Monitoring* permission.
+
+By default (`HOTKEY_EXCLUSIVE=false`) the hotkey is observed but passed straight through, so it keeps working normally everywhere else. Set `HOTKEY_EXCLUSIVE=true` only if you need to stop other apps (e.g. another dictation tool) from also seeing the key — it then consumes the hotkey. Either way, if the app ever misbehaves you can force-quit it from **Activity Monitor** (or `pkill -f QuickDictate` over SSH).
 
 ### Recommended: Groq
 

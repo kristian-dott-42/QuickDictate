@@ -468,18 +468,21 @@ class Delegate: NSObject, NSApplicationDelegate {
             (1 << CGEventType.keyDown.rawValue) |
             (1 << CGEventType.keyUp.rawValue)
 
-        // SAFETY: a .listenOnly tap is delivered events but the system never waits
-        // for it, so it can never delay, drop, or consume keystrokes — it cannot
-        // freeze the keyboard no matter what this app does. We only upgrade to an
-        // active (.defaultTap) tap when the user explicitly opts into exclusive mode
-        // (which is needed to consume the hotkey). Even then, the tap runs on its own
-        // thread (below) so it stays independent of any main-thread/UI work.
-        let tapOptions: CGEventTapOptions = HOTKEY_EXCLUSIVE ? .defaultTap : .listenOnly
-
+        // The freeze the old build could cause came from servicing the tap on the
+        // MAIN run loop while it was busy with UI work — NOT from the tap being
+        // active. We keep an active (.defaultTap) tap so we need only Accessibility
+        // permission (already required to paste via ⌘V). A .listenOnly tap would
+        // instead demand the *separate* Input Monitoring permission, which silently
+        // breaks the hotkey if it isn't granted. Safety now comes from:
+        //   (a) running the tap on its own thread (below), so UI work can never
+        //       delay key delivery, and
+        //   (b) a callback that never blocks and only consumes the hotkey itself,
+        //       and only when HOTKEY_EXCLUSIVE is set (otherwise every key, the
+        //       hotkey included, is passed straight through).
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: tapOptions,
+            options: .defaultTap,
             eventsOfInterest: mask,
             callback: eventTapCallback,
             userInfo: nil
@@ -506,7 +509,7 @@ class Delegate: NSObject, NSApplicationDelegate {
         thread.start()
         tapThread = thread
 
-        let modeDesc = HOTKEY_EXCLUSIVE ? "active/exclusive" : "listen-only"
+        let modeDesc = HOTKEY_EXCLUSIVE ? "exclusive (consumes hotkey)" : "passthrough"
         log("Ready — keycode \(HOTKEY_KEYCODE), exclusive: \(HOTKEY_EXCLUSIVE), tap: \(modeDesc)")
         notify("Dictate", "Ready — hold fn to dictate")
     }
