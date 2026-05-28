@@ -44,13 +44,15 @@ Edit `~/.dictate/.env`. Changes take effect on the next recording — no restart
 | `WHISPER_PROMPT` | — | Vocabulary hint — names, brands, jargon |
 | `CLEANUP_PROMPT` | built-in | Override the cleanup instructions entirely |
 | `HOTKEY_KEYCODE` | `63` (fn) | Push-to-talk key (e.g. `61` = right option) |
-| `HOTKEY_EXCLUSIVE` | `true` | Consume the key so no other app can grab it |
+| `HOTKEY_EXCLUSIVE` | `false` | `true` consumes the key (active tap) so no other app sees it — see safety note below |
 
 `.env` is re-read before every dictation, so changes to keys, models, or prompts take effect immediately — no restart. (`HOTKEY_*` are read once at launch, so restart the app after changing those.)
 
-### Reliability
+### Reliability & safety
 
-The hotkey is captured with an active `CGEventTap` inserted at the head of the event stream, so QuickDictate gets the key **first** and (with `HOTKEY_EXCLUSIVE=true`) consumes it — preventing other apps, especially other dictation tools, from racing for the same key. The paste is synthesised directly via `CGEvent`, with no AppleScript or System Events dependency.
+By default the hotkey is observed with a **listen-only** `CGEventTap`: the system delivers key events to QuickDictate but never waits for it, so it can never delay, drop, or consume your keystrokes — it **cannot freeze the keyboard**, whatever the app is doing. The tap is also serviced on its own dedicated thread, keeping key delivery independent of any UI work. The paste is synthesised directly via `CGEvent`, with no AppleScript or System Events dependency.
+
+**Exclusive mode (`HOTKEY_EXCLUSIVE=true`)** upgrades to an *active* tap so the hotkey is consumed and no other app (e.g. another dictation tool) sees it. This is opt-in because an active tap sits in the live event path. QuickDictate runs it on a dedicated thread and never blocks in the callback, so a freeze should not happen — but if the app ever does hang in this mode, force-quit it from **Activity Monitor** (or `pkill -f QuickDictate` over SSH) to restore the key. Most people don't need exclusive mode.
 
 ### Recommended: Groq
 

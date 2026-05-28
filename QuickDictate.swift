@@ -56,7 +56,9 @@ func hotkeyConfig() -> (keycode: Int64, exclusive: Bool) {
         ProcessInfo.processInfo.environment[k] ?? env[k] ?? d
     }
     let code = Int64(cfg("HOTKEY_KEYCODE", "63")) ?? 63
-    let excl = cfg("HOTKEY_EXCLUSIVE", "true").lowercased()
+    // Default to NON-exclusive: a listen-only tap can never freeze the keyboard.
+    // Exclusive mode uses an active tap and must be opted into deliberately.
+    let excl = cfg("HOTKEY_EXCLUSIVE", "false").lowercased()
     return (code, excl == "true" || excl == "1" || excl == "yes")
 }
 
@@ -431,6 +433,7 @@ class Delegate: NSObject, NSApplicationDelegate {
     var tmpPath = ""
     var isRecording = false
     var eventTap: CFMachPort?
+    var tapThread: Thread?
     var targetApp: NSRunningApplication?
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -460,17 +463,23 @@ class Delegate: NSObject, NSApplicationDelegate {
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         AXIsProcessTrustedWithOptions(opts)
 
-        // Active event tap, head-inserted at the session level: we get the key
-        // FIRST and (when exclusive) consume it so no other app can race for it.
         let mask: CGEventMask =
             (1 << CGEventType.flagsChanged.rawValue) |
             (1 << CGEventType.keyDown.rawValue) |
             (1 << CGEventType.keyUp.rawValue)
 
+        // SAFETY: a .listenOnly tap is delivered events but the system never waits
+        // for it, so it can never delay, drop, or consume keystrokes — it cannot
+        // freeze the keyboard no matter what this app does. We only upgrade to an
+        // active (.defaultTap) tap when the user explicitly opts into exclusive mode
+        // (which is needed to consume the hotkey). Even then, the tap runs on its own
+        // thread (below) so it stays independent of any main-thread/UI work.
+        let tapOptions: CGEventTapOptions = HOTKEY_EXCLUSIVE ? .defaultTap : .listenOnly
+
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .defaultTap,
+            options: tapOptions,
             eventsOfInterest: mask,
             callback: eventTapCallback,
             userInfo: nil
@@ -480,11 +489,25 @@ class Delegate: NSObject, NSApplicationDelegate {
             return
         }
         eventTap = tap
-        let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
 
-        log("Ready — keycode \(HOTKEY_KEYCODE), exclusive: \(HOTKEY_EXCLUSIVE)")
+        // Service the tap on a dedicated high-priority thread with its OWN run loop.
+        // Keeping it off the main run loop means bubble animation, window activation,
+        // pasteboard writes, etc. can never stall keyboard delivery — the original
+        // cause of the system-wide keyboard freeze when an active tap was serviced on
+        // a busy main loop.
+        let thread = Thread {
+            let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), src, .commonModes)
+            CGEvent.tapEnable(tap: tap, enable: true)
+            CFRunLoopRun()
+        }
+        thread.name = "com.kristian.quickdictate.eventtap"
+        thread.qualityOfService = .userInteractive
+        thread.start()
+        tapThread = thread
+
+        let modeDesc = HOTKEY_EXCLUSIVE ? "active/exclusive" : "listen-only"
+        log("Ready — keycode \(HOTKEY_KEYCODE), exclusive: \(HOTKEY_EXCLUSIVE), tap: \(modeDesc)")
         notify("Dictate", "Ready — hold fn to dictate")
     }
 
