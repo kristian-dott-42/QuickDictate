@@ -8,7 +8,8 @@ Hold the `fn` key, speak, release. Your speech is transcribed by Whisper, cleane
 - 🪶 **Lightweight**: one ~250 KB Swift binary, no Electron, no Python, no dependencies
 - 🔒 **Private**: your audio goes only to the provider you configure
 - 🎯 **Smart cleanup**: removes filler words, fixes punctuation and capitalisation
-- 🫧 **Visible**: floating bubble shows you when it's recording / transcribing
+- 🫧 **Visible**: floating bubble shows recording / transcribing, plus a ✅ on success or a clear failure state
+- 📋 **Clipboard-safe**: your existing clipboard is restored after each paste
 - 💸 **Cheap**: heavy daily use costs pennies a week with Groq's free tier
 
 ## Install
@@ -82,12 +83,12 @@ WHISPER_PROMPT=Acme Corp, Jane Smith, Kubernetes, gRPC, Prometheus,
 
 ## How it works
 
-1. **Hotkey** — `NSEvent.addGlobalMonitorForEvents` watches for `fn` press/release
+1. **Hotkey** — an active `CGEventTap` at the head of the event stream watches for `fn` press/release
 2. **Recording** — `AVAudioRecorder` captures 16 kHz mono PCM
 3. **Focus capture** — remembers the frontmost app at the moment recording starts
 4. **Transcription** — POST audio to Whisper endpoint
 5. **Cleanup** — POST raw transcript to LLM with a cleanup prompt
-6. **Paste** — re-activate the captured app, set clipboard, send `⌘V` via `NSAppleScript`
+6. **Paste** — re-activate the captured app, set the clipboard, send `⌘V` via `CGEvent`, then restore your previous clipboard
 
 The whole app is a single ~500 line Swift file with no external dependencies.
 
