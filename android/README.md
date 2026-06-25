@@ -69,6 +69,31 @@ sync — it will provision the Gradle wrapper and Android SDK automatically.
 
 Requirements: Android SDK 35, JDK 17, a device/emulator on Android 8.0 (API 26)+.
 
+## Personal use / sideloading
+
+This is built as a personal tool — install your own build directly on your device
+and you skip the Play Store entirely (and everything in *Caveats* below, which are
+Play *publishing* requirements, not Android OS requirements).
+
+The easiest path:
+
+1. Open `android/` in Android Studio, connect your phone over USB with **Developer
+   Options → USB debugging** enabled, and press **Run**. It builds a debug-signed
+   APK, installs it, and launches — with live `logcat` for debugging. A real device
+   is better than the emulator for testing the overlay + "type into other apps"
+   flow. (To sideload manually instead: `./gradlew assembleDebug` →
+   `app/build/outputs/apk/debug/app-debug.apk`.)
+
+2. **Allow restricted settings.** On Android 13+, sideloaded apps can't enable an
+   accessibility service until you lift the "restricted settings" block. If the
+   accessibility toggle is greyed out, go to **Settings → Apps → QuickDictate → ⋮
+   (top-right) → Allow restricted settings**, then enable it. This is an Android
+   safety gate for non-Play installs, not a bug in the app — and it's the single
+   most common thing that trips people up.
+
+A debug-signed APK installs fine on your own device with no Play account. Your API
+key stays on the device.
+
 ## First-run setup (on device)
 
 1. Launch the app.
@@ -82,7 +107,10 @@ Requirements: Android SDK 35, JDK 17, a device/emulator on Android 8.0 (API 26)+
 4. Tap **Start**. A floating mic appears. Tap it to record, tap again to stop —
    the cleaned text is typed at your cursor. Drag the button to reposition it.
 
-## Caveats (before this is Play-Store ready)
+## Caveats (only if you publish to the Play Store)
+
+These are distribution requirements — skip them entirely for personal sideloading.
+
 
 - **Accessibility-service policy.** Google Play scrutinises apps that use an
   accessibility service. You'll need a clear in-store disclosure and a privacy
