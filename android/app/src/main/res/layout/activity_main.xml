@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/app_name"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/tagline"
+            android:textSize="14sp" />
+
+        <!-- Setup status -->
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:fontFamily="monospace"
+            android:textSize="14sp" />
+
+        <!-- 1. Permissions -->
+        <TextView style="@style/SectionHeader" android:text="@string/section_permissions" />
+
+        <Button
+            android:id="@+id/grantMic"
+            style="@style/SetupButton"
+            android:text="@string/grant_mic" />
+
+        <Button
+            android:id="@+id/grantOverlay"
+            style="@style/SetupButton"
+            android:text="@string/grant_overlay" />
+
+        <Button
+            android:id="@+id/grantAccessibility"
+            style="@style/SetupButton"
+            android:text="@string/grant_accessibility" />
+
+        <!-- 2. API key -->
+        <TextView style="@style/SectionHeader" android:text="@string/section_provider" />
+
+        <EditText
+            android:id="@+id/groqKey"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_groq_key"
+            android:importantForAutofill="no"
+            android:inputType="textPassword" />
+
+        <!-- 3. Advanced -->
+        <TextView style="@style/SectionHeader" android:text="@string/section_advanced" />
+
+        <EditText android:id="@+id/sttUrl" style="@style/ConfigField" android:hint="@string/hint_stt_url" />
+        <EditText android:id="@+id/sttModel" style="@style/ConfigField" android:hint="@string/hint_stt_model" />
+        <EditText android:id="@+id/llmUrl" style="@style/ConfigField" android:hint="@string/hint_llm_url" />
+        <EditText android:id="@+id/llmModel" style="@style/ConfigField" android:hint="@string/hint_llm_model" />
+        <EditText android:id="@+id/whisperPrompt" style="@style/ConfigField" android:hint="@string/hint_whisper_prompt" />
+
+        <Button
+            android:id="@+id/saveButton"
+            style="@style/SetupButton"
+            android:text="@string/save_settings" />
+
+        <!-- 4. Run -->
+        <TextView style="@style/SectionHeader" android:text="@string/section_run" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/startButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/start_button" />
+
+            <Button
+                android:id="@+id/stopButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/stop_button" />
+        </LinearLayout>
+
+    </LinearLayout>
+</ScrollView>

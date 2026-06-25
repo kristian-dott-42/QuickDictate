@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="56dp"
+    android:layout_height="56dp">
+
+    <ImageView
+        android:id="@+id/micButton"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:background="@drawable/mic_button_bg"
+        android:contentDescription="@string/mic_button_desc"
+        android:padding="14dp"
+        android:src="@drawable/ic_mic" />
+
+    <ProgressBar
+        android:id="@+id/spinner"
+        android:layout_width="28dp"
+        android:layout_height="28dp"
+        android:layout_gravity="center"
+        android:indeterminateTint="#FFFFFF"
+        android:visibility="gone" />
+</FrameLayout>
