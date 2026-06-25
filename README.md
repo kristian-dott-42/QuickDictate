@@ -4,7 +4,7 @@ A lightweight, fast push-to-talk dictation app for macOS — a free, self-hosted
 
 Hold the `fn` key, speak, release. Your speech is transcribed by Whisper, cleaned up by an LLM, and pasted at your cursor — in any app.
 
-- ⚡ **Fast**: ~1 second end-to-end with Groq (Whisper-large-v3-turbo + Llama-3.1-8B)
+- ⚡ **Fast**: ~1 second end-to-end with Groq (Whisper-large-v3-turbo + Llama-3.3-70B)
 - 🪶 **Lightweight**: one ~250 KB Swift binary, no Electron, no Python, no dependencies
 - 🔒 **Private**: your audio goes only to the provider you configure
 - 🎯 **Smart cleanup**: removes filler words, fixes punctuation and capitalisation
