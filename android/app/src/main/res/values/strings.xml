@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">QuickDictate</string>
+    <string name="tagline">Tap the floating mic, speak, and the cleaned-up text is typed wherever your cursor is.</string>
+
+    <string name="accessibility_label">QuickDictate text insertion</string>
+    <string name="accessibility_description">Lets QuickDictate insert dictated text into the field you\'re typing in. QuickDictate does not read or collect screen content; it only pastes transcribed text on demand.</string>
+
+    <!-- Sections -->
+    <string name="section_permissions">1. Permissions</string>
+    <string name="section_provider">2. API key</string>
+    <string name="section_advanced">3. Advanced (optional)</string>
+    <string name="section_run">4. Floating button</string>
+
+    <!-- Setup buttons -->
+    <string name="grant_mic">Grant microphone</string>
+    <string name="grant_overlay">Allow drawing over apps</string>
+    <string name="grant_accessibility">Enable text insertion (accessibility)</string>
+    <string name="save_settings">Save settings</string>
+    <string name="start_button">Start</string>
+    <string name="stop_button">Stop</string>
+
+    <!-- Fields -->
+    <string name="hint_groq_key">Groq API key (gsk_…)</string>
+    <string name="hint_stt_url">STT URL</string>
+    <string name="hint_stt_model">STT model</string>
+    <string name="hint_llm_url">LLM URL</string>
+    <string name="hint_llm_model">LLM model</string>
+    <string name="hint_whisper_prompt">Vocabulary hint (names, jargon — optional)</string>
+
+    <!-- Status -->
+    <string name="status_template">Setup\n  Microphone:    %1$s\n  Draw over apps: %2$s\n  Text insertion: %3$s</string>
+
+    <!-- Toasts / messages -->
+    <string name="saved">Saved</string>
+    <string name="need_mic">Grant the microphone permission first</string>
+    <string name="need_overlay">Allow drawing over other apps first</string>
+    <string name="need_accessibility">Enable the text-insertion accessibility service first</string>
+    <string name="enable_accessibility_hint">Find QuickDictate under Installed apps and turn it on</string>
+    <string name="floating_started">Floating mic started</string>
+    <string name="enable_accessibility_first">Enable QuickDictate\'s accessibility service to insert text</string>
+    <string name="record_failed">Couldn\'t start recording</string>
+    <string name="too_short">Too short — hold a little longer</string>
+    <string name="no_api_key">Add your Groq API key in settings</string>
+    <string name="transcribe_failed">Transcription failed — check your key and connection</string>
+
+    <!-- Overlay -->
+    <string name="mic_button_desc">Dictate</string>
+    <string name="overlay_channel_name">Floating mic</string>
+    <string name="overlay_running">QuickDictate mic is active</string>
+</resources>
