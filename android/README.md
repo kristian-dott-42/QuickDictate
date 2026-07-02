@@ -103,7 +103,7 @@ key stays on the device.
    - Text insertion (accessibility) — find *QuickDictate* under *Installed apps*
 3. **API key** — paste your Groq key (`gsk_…`). Get one at
    [console.groq.com](https://console.groq.com). Defaults target Groq's
-   `whisper-large-v3-turbo` + `llama-3.3-70b-versatile`.
+   `whisper-large-v3-turbo` + `openai/gpt-oss-120b`.
 4. Tap **Start**. A floating mic appears. Tap it to record, tap again to stop —
    the cleaned text is typed at your cursor. Drag the button to reposition it.
 

@@ -36,9 +36,11 @@ data class Config(
         const val DEFAULT_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
         const val DEFAULT_STT_MODEL = "whisper-large-v3-turbo"
         const val DEFAULT_LLM_URL = "https://api.groq.com/openai/v1/chat/completions"
-        // Matches the desktop recommendation — the 8B model is decommissioned and
-        // small models tend to "answer" dictation instead of just cleaning it up.
-        const val DEFAULT_LLM_MODEL = "llama-3.3-70b-versatile"
+        // Matches the desktop recommendation. A capable model matters here: small
+        // models tend to "answer" dictation instead of just cleaning it up. Groq's
+        // production-tier gpt-oss-120b replaces the deprecated llama-3.3-70b-versatile
+        // (decommissioned 16 Aug 2026); prefer it over the qwen3.6-27b preview model.
+        const val DEFAULT_LLM_MODEL = "openai/gpt-oss-120b"
 
         fun load(context: Context): Config {
             val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

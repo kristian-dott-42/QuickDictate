@@ -6,7 +6,7 @@ Hold the `fn` key, speak, release. Your speech is transcribed by Whisper, cleane
 
 > 📱 **Android version:** there's a sibling WisprFlow-style app in [`android/`](android/) — a floating mic button that types into any app, sharing the same transcribe → cleanup pipeline. See [android/README.md](android/README.md).
 
-- ⚡ **Fast**: ~1 second end-to-end with Groq (Whisper-large-v3-turbo + Llama-3.3-70B)
+- ⚡ **Fast**: ~1 second end-to-end with Groq (Whisper-large-v3-turbo + GPT-OSS-120B)
 - 🪶 **Lightweight**: one ~250 KB Swift binary, no Electron, no Python, no dependencies
 - 🔒 **Private**: your audio goes only to the provider you configure
 - 🎯 **Smart cleanup**: removes filler words, fixes punctuation and capitalisation
@@ -82,15 +82,20 @@ STT_KEY=gsk_...
 STT_MODEL=whisper-large-v3-turbo
 LLM_URL=https://api.groq.com/openai/v1/chat/completions
 LLM_KEY=gsk_...
-LLM_MODEL=llama-3.3-70b-versatile
+LLM_MODEL=openai/gpt-oss-120b
 ```
 
 Get a key at [console.groq.com](https://console.groq.com).
 
-> **Note on the cleanup model:** use a capable model like `llama-3.3-70b-versatile`.
+> **Note on the cleanup model:** use a capable model like `openai/gpt-oss-120b`.
 > Small models (e.g. `llama-3.1-8b-instant`) sometimes *respond* to dictation that
-> sounds like a request instead of just cleaning it up. Groq runs the 70B fast
+> sounds like a request instead of just cleaning it up. Groq runs the 120B fast
 > enough that there's no real latency cost.
+>
+> _(`llama-3.3-70b-versatile` was the previous recommendation; Groq deprecated it
+> in June 2026, decommissioning on 16 Aug 2026. `openai/gpt-oss-120b` is Groq's
+> production-tier replacement — prefer it over the `qwen/qwen3.6-27b` preview model,
+> which is evaluation-only and can be withdrawn at short notice.)_
 
 ### Vocabulary tuning
 
