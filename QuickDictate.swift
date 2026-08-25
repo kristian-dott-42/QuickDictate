@@ -185,12 +185,81 @@ func pasteText(_ text: String, target: NSRunningApplication?, onDone: @escaping 
 
 // MARK: - APIs
 
-func callSTT(path: String, config: Config) -> String? {
-    guard let url = URL(string: config.sttURL) else {
-        log("stt config error: invalid STT_URL '\(config.sttURL)'")
-        return nil
+/// Every distinct way transcription can fail.
+///
+/// These used to collapse into a single `nil`, which meant a VPN swallowing the
+/// request, a rejected API key and a genuinely silent microphone all surfaced as
+/// the same "Nothing heard" bubble — three very different fixes behind one label.
+enum STTResult {
+    case text(String)          // a usable, non-empty transcript
+    case silence               // 2xx, but the provider transcribed nothing
+    case offline               // the request never reached the endpoint
+    case timedOut              // no reply within REQUEST_TIMEOUT
+    case transport(String)     // any other transport-level failure
+    case http(Int, String?)    // non-2xx, plus the provider's message if it sent one
+    case badResponse           // 2xx, but not a shape we understand
+    case badConfig(String)     // bad STT_URL, unreadable recording
+
+    /// Short enough for the bubble; `logDetail` carries the specifics.
+    var bubbleMessage: String {
+        switch self {
+        case .text:        return "Done"
+        case .silence:     return "No speech"
+        case .offline:     return "No connection"
+        case .timedOut:    return "Timed out"
+        case .transport:   return "Network error"
+        case .badResponse: return "Bad response"
+        case .badConfig:   return "Config error"
+        case .http(let code, _):
+            switch code {
+            case 401, 403:  return "Key rejected"
+            case 404:       return "Endpoint 404"
+            case 429:       return "Rate limited"
+            case 400, 422:  return "Request refused"
+            case 500...599: return "Provider down"
+            default:        return "HTTP \(code)"
+            }
+        }
     }
-    guard let audio = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+
+    var logDetail: String {
+        switch self {
+        case .text(let t):        return "ok, \(t.count) chars"
+        case .silence:            return "empty transcript — the recording carried no speech (check the input device)"
+        case .offline:            return "endpoint unreachable — VPN, proxy, DNS or no network"
+        case .timedOut:           return "no response within \(Int(REQUEST_TIMEOUT))s"
+        case .transport(let d):   return "transport failure: \(d)"
+        case .badResponse:        return "2xx but no `text` field in the response"
+        case .badConfig(let d):   return d
+        case .http(let c, let m): return "http \(c)" + (m.map { " — \($0)" } ?? "")
+        }
+    }
+}
+
+/// Map a URLSession error onto the outcomes we can give distinct advice for.
+/// A blocked or misrouted endpoint (the VPN case) lands in `.offline`; anything
+/// we can't classify keeps its description so the log stays useful.
+private func classifyTransport(_ error: Error) -> STTResult {
+    guard let e = error as? URLError else { return .transport(error.localizedDescription) }
+    switch e.code {
+    case .notConnectedToInternet, .cannotFindHost, .cannotConnectToHost,
+         .dnsLookupFailed, .networkConnectionLost, .internationalRoamingOff,
+         .dataNotAllowed, .secureConnectionFailed:
+        return .offline
+    case .timedOut:
+        return .timedOut
+    default:
+        return .transport("\(e.code.rawValue) \(e.localizedDescription)")
+    }
+}
+
+func callSTT(path: String, config: Config) -> STTResult {
+    guard let url = URL(string: config.sttURL) else {
+        return .badConfig("invalid STT_URL '\(config.sttURL)'")
+    }
+    guard let audio = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+        return .badConfig("could not read the recording at \(path)")
+    }
     var req = URLRequest(url: url)
     req.timeoutInterval = REQUEST_TIMEOUT
     req.httpMethod = "POST"
@@ -208,18 +277,33 @@ func callSTT(path: String, config: Config) -> String? {
     body.append("\r\n--\(b)--\r\n".data(using: .utf8)!)
     req.httpBody = body
     let sema = DispatchSemaphore(value: 0)
-    var result: String?
+    var result: STTResult = .badResponse
     URLSession.shared.dataTask(with: req) { data, resp, err in
         defer { sema.signal() }
-        if let err = err { log("stt network error: \(err)"); return }
-        if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            log("stt http error: status \(http.statusCode)")
+        if let err = err { result = classifyTransport(err); return }
+        guard let http = resp as? HTTPURLResponse else { result = .badResponse; return }
+        var json: [String: Any]? = nil
+        if let data = data { json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] }
+        // Providers report failures either as an `error` object or as a bare
+        // string; keep whichever we get so the log names the real cause.
+        let apiMessage = (json?["error"] as? [String: Any])?["message"] as? String
+            ?? json?["error"] as? String
+        guard (200..<300).contains(http.statusCode) else {
+            // No parseable message — fall back to a snippet of the raw body, which
+            // is how a captive portal or proxy error page announces itself.
+            let snippet = apiMessage ?? data.flatMap {
+                String(data: Data($0.prefix(200)), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            result = .http(http.statusCode, snippet?.isEmpty == false ? snippet : nil)
+            return
         }
-        if let data = data,
-           let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let t = j["text"] as? String { result = t.trimmingCharacters(in: .whitespacesAndNewlines) }
-            else if let e = j["error"] as? [String: Any] { log("stt api error: \(e)") }
+        guard let t = json?["text"] as? String else {
+            result = apiMessage.map { STTResult.http(http.statusCode, $0) } ?? .badResponse
+            return
         }
+        let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
+        result = trimmed.isEmpty ? .silence : .text(trimmed)
     }.resume()
     sema.wait()
     return result
@@ -275,8 +359,35 @@ func callLLM(raw: String, config: Config) -> String {
 
 class BubbleView: NSView {
     enum Mode { case recording, transcribing, success, error }
+
+    static let height: CGFloat = 32
+    static let minWidth: CGFloat = 150
+    private static let textInset: CGFloat = 32     // dot + gap before the label
+    private static let trailingPad: CGFloat = 18
+    private static let labelAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+        .foregroundColor: NSColor.white,
+    ]
+
+    // Failure labels vary in length ("No speech" vs "Request refused"), so the
+    // bubble is sized to whatever it is about to draw rather than fixed.
+    static func width(for label: String) -> CGFloat {
+        let w = NSAttributedString(string: label, attributes: labelAttrs).size().width
+        return max(minWidth, ceil(w) + textInset + trailingPad)
+    }
+
+    static func defaultLabel(for mode: Mode) -> String {
+        switch mode {
+        case .recording:    return "Recording"
+        case .transcribing: return "Transcribing"
+        case .success:      return "Done"
+        case .error:        return "Failed"
+        }
+    }
+
     var mode: Mode = .recording { didSet { needsDisplay = true } }
     var text: String? { didSet { needsDisplay = true } }   // optional custom label
+    var label: String { text ?? BubbleView.defaultLabel(for: mode) }
     private var phase: CGFloat = 0
     private var timer: Timer?
 
@@ -298,22 +409,18 @@ class BubbleView: NSView {
 
         let dot = NSRect(x: 14, y: (bounds.height - 10) / 2, width: 10, height: 10)
         // Recording/transcribing pulse to show activity; success/error are steady.
-        let color: NSColor, label: String, pulses: Bool
+        let color: NSColor, pulses: Bool
         switch mode {
-        case .recording:    color = .systemRed;    label = "Recording";    pulses = true
-        case .transcribing: color = .systemOrange; label = "Transcribing"; pulses = true
-        case .success:      color = .systemGreen;  label = "Done";         pulses = false
-        case .error:        color = .systemRed;    label = "Failed";       pulses = false
+        case .recording:    color = .systemRed;    pulses = true
+        case .transcribing: color = .systemOrange; pulses = true
+        case .success:      color = .systemGreen;  pulses = false
+        case .error:        color = .systemRed;    pulses = false
         }
         let alpha = pulses ? (0.45 + 0.55 * abs(sin(phase))) : 1.0
         color.withAlphaComponent(alpha).setFill()
         NSBezierPath(ovalIn: dot).fill()
 
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-            .foregroundColor: NSColor.white,
-        ]
-        let s = NSAttributedString(string: text ?? label, attributes: attrs)
+        let s = NSAttributedString(string: label, attributes: BubbleView.labelAttrs)
         s.draw(at: NSPoint(x: 32, y: (bounds.height - s.size().height) / 2 - 1))
     }
 }
@@ -329,8 +436,21 @@ final class Bubble {
             if self.window == nil { self.build() }
             self.view?.text = nil
             self.view?.mode = mode
+            self.resize()
             self.window?.orderFrontRegardless()
         }
+    }
+
+    // Re-centre the panel at whatever width the current label needs.
+    // Must run on the main thread; every caller is already inside a main-queue block.
+    private func resize() {
+        guard let panel = window, let view = view, let screen = NSScreen.main else { return }
+        let w = BubbleView.width(for: view.label), h = BubbleView.height
+        let x = screen.frame.midX - w / 2
+        let y = screen.visibleFrame.maxY - h - 14
+        panel.setFrame(NSRect(x: x, y: y, width: w, height: h), display: true)
+        view.frame = NSRect(x: 0, y: 0, width: w, height: h)
+        view.needsDisplay = true
     }
 
     // Briefly show a final state (e.g. success / error) then auto-hide — unless a
@@ -342,6 +462,7 @@ final class Bubble {
             if self.window == nil { self.build() }
             self.view?.text = message
             self.view?.mode = mode
+            self.resize()
             self.window?.orderFrontRegardless()
             DispatchQueue.main.asyncAfter(deadline: .now() + hideAfter) {
                 if self.generation == gen { self.hide() }
@@ -360,7 +481,7 @@ final class Bubble {
 
     private func build() {
         guard let screen = NSScreen.main else { return }
-        let w: CGFloat = 150, h: CGFloat = 32
+        let w = BubbleView.minWidth, h = BubbleView.height
         let x = screen.frame.midX - w / 2
         let y = screen.visibleFrame.maxY - h - 14
         let rect = NSRect(x: x, y: y, width: w, height: h)
@@ -548,12 +669,14 @@ class Delegate: NSObject, NSApplicationDelegate {
         defer { try? FileManager.default.removeItem(atPath: path) }
         let config = Config.load()   // re-read .env so edits apply with no restart
         let t0 = Date()
-        guard let raw = callSTT(path: path, config: config), !raw.isEmpty else {
-            log("Nothing heard.")
-            bubble.flash(.error, "Nothing heard")
+        let outcome = callSTT(path: path, config: config)
+        let sttTime = Date().timeIntervalSince(t0)
+        guard case .text(let raw) = outcome else {
+            // The bubble names the failure; the log explains it.
+            log(String(format: "stt failed after %.2fs: %@", sttTime, outcome.logDetail))
+            bubble.flash(.error, outcome.bubbleMessage)
             return
         }
-        let sttTime = Date().timeIntervalSince(t0)
         log(String(format: "stt %.2fs: %@", sttTime, raw))
         guard !HALLUCINATIONS.contains(raw.lowercased()) else {
             log("hallucination skipped")

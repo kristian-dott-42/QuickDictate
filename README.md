@@ -8,7 +8,7 @@ Hold the `fn` key, speak, release. Your speech is transcribed by Whisper, cleane
 - 🪶 **Lightweight**: one ~250 KB Swift binary, no Electron, no Python, no dependencies
 - 🔒 **Private**: your audio goes only to the provider you configure
 - 🎯 **Smart cleanup**: removes filler words, fixes punctuation and capitalisation
-- 🫧 **Visible**: floating bubble shows recording / transcribing, plus a ✅ on success or a clear failure state
+- 🫧 **Visible**: floating bubble shows recording / transcribing, plus a ✅ on success — and on failure it names the cause ("No connection", "Key rejected", "Rate limited") rather than guessing
 - 📋 **Clipboard-safe**: your existing clipboard is restored after each paste
 - 💸 **Cheap**: heavy daily use costs pennies a week with Groq's free tier
 
@@ -132,8 +132,25 @@ pkill -f QuickDictate && open ~/Applications/QuickDictate.app
 **Hotkey does nothing:**
 Same as above — Accessibility permission was lost.
 
-**"Nothing heard":**
-Spoken too quietly or wrong mic. Check System Settings → Sound → Input.
+**A red bubble with a failure message:**
+The bubble names which stage failed, so you can go straight to the fix. Full
+detail for every one of these is written to `~/.dictate/dictate.log`.
+
+| Bubble | What happened | Fix |
+|---|---|---|
+| `No speech` | The transcription succeeded but returned nothing — the recording was silent | Wrong or muted input device; check System Settings → Sound → Input |
+| `No connection` | The request never reached the endpoint | **VPN or proxy** intercepting the traffic, or you're offline |
+| `Timed out` | No reply within 30s | Slow link, or the provider is struggling |
+| `Key rejected` | 401/403 | `STT_KEY` in `~/.dictate/.env` is wrong, expired or rotated |
+| `Rate limited` | 429 | Free-tier quota — wait, or move to a paid tier |
+| `Request refused` | 400/422 | Usually a retired or misspelled `STT_MODEL` |
+| `Endpoint 404` | 404 | `STT_URL` points somewhere that isn't a transcription endpoint |
+| `Provider down` | 5xx | Their side — check the provider's status page |
+| `Bad response` | 2xx with an unrecognised body | Often a captive portal or proxy returning HTML |
+| `Config error` | Bad `STT_URL`, or the recording couldn't be read | Check `.env` |
+
+A `No connection` right after everything worked fine is nearly always a VPN
+that came up in the background.
 
 **Whisper mishears names:**
 Add them to `WHISPER_PROMPT` in `.env`.
